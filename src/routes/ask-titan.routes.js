@@ -17,6 +17,10 @@ const {
   deleteRule,
   getEnforcementForContact,
 } = require('../services/boundary.service');
+const {
+  suggestSnoozeTime,
+  rankSnoozeWakeups,
+} = require('../services/snooze-ai.service');
 
 const router = express.Router();
 const PREFIX = '/hack/juggadexe';
@@ -229,6 +233,37 @@ router.post(`${PREFIX}/actions/:id/cancel`, (req, res) => {
   }
   transition(action.id, 'CANCELLED');
   res.json(getAction(action.id));
+});
+
+// --- Snooze AI proxy (moves the OpenAI key server-side, out of the client
+// bundle - see snooze-ai.service.js and the frontend's snooze-ai.api.ts) ---
+
+router.post(`${PREFIX}/suggest-snooze-time`, async (req, res) => {
+  const { subject, snippet, now } = req.body || {};
+  if (typeof subject !== 'string' || typeof snippet !== 'string' || typeof now !== 'number') {
+    return res.status(400).json({ error: 'subject, snippet, and now are required' });
+  }
+  try {
+    const result = await suggestSnoozeTime({ subject, snippet, now });
+    return res.json(result);
+  } catch (err) {
+    // Fail closed, same convention as /ask-titan/query above - never a
+    // 500/crash just because the model or the key isn't available.
+    return res.status(503).json({ error: err.code || 'AI_UNAVAILABLE' });
+  }
+});
+
+router.post(`${PREFIX}/rank-snooze-wakeups`, async (req, res) => {
+  const { items } = req.body || {};
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'items must be a non-empty array' });
+  }
+  try {
+    const result = await rankSnoozeWakeups({ items });
+    return res.json(result);
+  } catch (err) {
+    return res.status(503).json({ error: err.code || 'AI_UNAVAILABLE' });
+  }
 });
 
 module.exports = router;
