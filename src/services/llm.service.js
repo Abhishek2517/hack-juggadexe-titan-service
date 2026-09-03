@@ -2,6 +2,7 @@ const OpenAI = require('openai');
 const mailbox = require('../data/mailbox.mock.json');
 const { getWaitingOn, getNeedsResponse } = require('./waiting-on.service');
 const { getCommitments } = require('./commitment.service');
+const { getEnforcementForThread } = require('./boundary.service');
 
 let client = null;
 function getClient() {
@@ -30,17 +31,29 @@ function getClient() {
  * @param {string|undefined} currentUserEmail - forwarded to getWaitingOn()/
  *   getCommitments() so "who is waiting on whom" resolves against the real
  *   account instead of the mock user.
+ *
+ * Boundary rules: threads under a "complete_exclusion" rule are dropped
+ * before the LLM ever sees them — not just filtered from the final answer.
+ * This is what makes the boundary a genuine access restriction rather than a
+ * display-layer filter: excluded content never reaches buildMailboxContext's
+ * output at all, so it can't leak into the model's grounding data, its
+ * "general" search results, or a hallucinated answer. skippedThreadsCount is
+ * exposed so callers can report how much was hidden without exposing what.
  */
 function buildMailboxContext(realThreads, realMessages, currentUserEmail) {
+  const rawThreads = realThreads !== undefined ? realThreads : mailbox.threads;
+  const visibleThreads = rawThreads.filter(
+    (t) => getEnforcementForThread(t) !== 'complete_exclusion'
+  );
   const threads =
     realThreads !== undefined
-      ? realThreads.map((t) => ({
+      ? visibleThreads.map((t) => ({
           threadId: t.threadId,
           subject: t.subject,
           participants: t.participants,
           lastMessageSnippet: (t.snippet || '').slice(0, 200),
         }))
-      : mailbox.threads.map((t) => ({
+      : visibleThreads.map((t) => ({
           threadId: t.threadId,
           subject: t.subject,
           participants: t.participants,
@@ -61,6 +74,7 @@ function buildMailboxContext(realThreads, realMessages, currentUserEmail) {
     needsResponse: getNeedsResponse(realThreads, realMessages, currentUserEmail),
     commitments: getCommitments(realThreads, realMessages, currentUserEmail),
     threads,
+    skippedThreadsCount: rawThreads.length - visibleThreads.length,
   };
 }
 

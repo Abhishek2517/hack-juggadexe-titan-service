@@ -58,6 +58,7 @@
     {
       "threadId": "t4",
       "subject": "Q3 report",
+      "folder": "/HR/Compensation",
       "participants": ["priya@abc.com", "raj@abc.com"],
       "messages": [
         {
