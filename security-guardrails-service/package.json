@@ -1,0 +1,22 @@
+{
+  "name": "security-guardrails-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone hackathon service for AI-based composer security guardrails (team: juggadexe). Does not touch existing Titan services/DB.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "dev": "nodemon --env-file-if-exists=.env src/server.js"
+  },
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "openai": "^4.68.0",
+    "openpgp": "^6.3.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
