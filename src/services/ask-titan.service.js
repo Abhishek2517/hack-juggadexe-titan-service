@@ -33,12 +33,25 @@ function buildWaitingOnAnswer(waiting) {
   return `You are waiting on responses from ${namesText}.`;
 }
 
+// How many items a boundary rule hid from this answer. Deliberately just a
+// count — never a subject line, sender, or any other content for the
+// skipped items themselves (Privacy Integrity Rule: enforced by this shape,
+// not by UI discipline downstream).
+function boundaryContextFor(filteredLength, unfilteredLength) {
+  return { skippedCount: Math.max(0, unfilteredLength - filteredLength) };
+}
+
 /**
  * Real LLM-backed query answering (Milestone 3). The LLM only classifies
  * intent and writes the natural-language answer — it never decides what
  * structured data goes back to the frontend. That still comes from our own
  * deterministic functions, same separation of concerns as the security
  * guardrail: AI reasons, rules/code supply the actual data.
+ *
+ * Every category also reports `boundary.skippedCount` — how many items a
+ * boundary rule hid from this specific answer, computed by comparing the
+ * normal (excluded) result against an includeExcluded:true recount. This is
+ * always a count-only recount, never a second, unfiltered payload.
  */
 async function answerQuery(
   query,
@@ -73,15 +86,22 @@ async function answerQuery(
     const waitingMessages =
       realThreads !== undefined ? [...(realMessages || []), ...(sentMessages || [])] : undefined;
     const waiting = getWaitingOn(waitingThreads, waitingMessages, currentUserEmail);
+    const allWaiting = getWaitingOn(waitingThreads, waitingMessages, currentUserEmail, {
+      includeExcluded: true,
+    });
     return {
       answer: buildWaitingOnAnswer(waiting),
       data: waiting,
       accessed: { threads: waiting.length, contacts: waiting.length, attachments: 0 },
+      boundary: boundaryContextFor(waiting.length, allWaiting.length),
     };
   }
 
   if (category === 'needs_response') {
     const needsResponse = getNeedsResponse(realThreads, realMessages, currentUserEmail);
+    const allNeedsResponse = getNeedsResponse(realThreads, realMessages, currentUserEmail, {
+      includeExcluded: true,
+    });
     return {
       answer,
       data: needsResponse,
@@ -90,11 +110,15 @@ async function answerQuery(
         contacts: needsResponse.length,
         attachments: 0,
       },
+      boundary: boundaryContextFor(needsResponse.length, allNeedsResponse.length),
     };
   }
 
   if (category === 'commitments') {
     const commitments = getCommitments(realThreads, realMessages, currentUserEmail);
+    const allCommitments = getCommitments(realThreads, realMessages, currentUserEmail, {
+      includeExcluded: true,
+    });
     return {
       answer,
       data: commitments,
@@ -103,6 +127,7 @@ async function answerQuery(
         contacts: commitments.length,
         attachments: 0,
       },
+      boundary: boundaryContextFor(commitments.length, allCommitments.length),
     };
   }
 
@@ -125,6 +150,17 @@ async function answerQuery(
     // AttentionDigest's own Urgent section already renders urgent/
     // urgentNeedsResponse side by side.
     const merged = [...urgentWaiting, ...urgentNeedsResponse];
+
+    const allWaiting = getWaitingOn(realThreads, realMessages, currentUserEmail, {
+      includeExcluded: true,
+    });
+    const allNeedsResponse = getNeedsResponse(realThreads, realMessages, currentUserEmail, {
+      includeExcluded: true,
+    });
+    const allMergedUrgentCount =
+      allWaiting.filter((w) => w.urgency === 'high').length +
+      allNeedsResponse.filter((n) => n.urgency === 'high').length;
+
     return {
       answer,
       data: merged,
@@ -133,15 +169,14 @@ async function answerQuery(
         contacts: merged.length,
         attachments: 0,
       },
+      boundary: boundaryContextFor(merged.length, allMergedUrgentCount),
     };
   }
 
   if (category === 'attention') {
     const waiting = getWaitingOn(realThreads, realMessages, currentUserEmail);
-    const cappedNeedsResponse = getNeedsResponse(realThreads, realMessages, currentUserEmail).slice(
-      0,
-      ATTENTION_DIGEST_NEEDS_RESPONSE_LIMIT
-    );
+    const needsResponseAll = getNeedsResponse(realThreads, realMessages, currentUserEmail);
+    const cappedNeedsResponse = needsResponseAll.slice(0, ATTENTION_DIGEST_NEEDS_RESPONSE_LIMIT);
     // Split by recency, not the existing urgency field (which is about
     // outgoing waits being overdue — the opposite direction): an incoming
     // thread received today or yesterday is time-sensitive/urgent, older
@@ -150,6 +185,24 @@ async function answerQuery(
     const needsResponse = cappedNeedsResponse.filter((n) => n.daysWaiting > 1);
     const commitments = getCommitments(realThreads, realMessages, currentUserEmail);
     const urgent = waiting.filter((w) => w.urgency === 'high');
+
+    // Boundary-skip counts are computed pre-cap (needsResponseAll vs its own
+    // includeExcluded:true recount) so the digest cap never gets conflated
+    // with content a boundary rule actually hid.
+    const allWaiting = getWaitingOn(realThreads, realMessages, currentUserEmail, {
+      includeExcluded: true,
+    });
+    const allNeedsResponse = getNeedsResponse(realThreads, realMessages, currentUserEmail, {
+      includeExcluded: true,
+    });
+    const allCommitments = getCommitments(realThreads, realMessages, currentUserEmail, {
+      includeExcluded: true,
+    });
+    const skippedCount =
+      boundaryContextFor(waiting.length, allWaiting.length).skippedCount +
+      boundaryContextFor(needsResponseAll.length, allNeedsResponse.length).skippedCount +
+      boundaryContextFor(commitments.length, allCommitments.length).skippedCount;
+
     return {
       answer,
       data: { urgent, urgentNeedsResponse, waiting, needsResponse, commitments },
@@ -158,6 +211,7 @@ async function answerQuery(
         contacts: waiting.length + cappedNeedsResponse.length,
         attachments: 0,
       },
+      boundary: { skippedCount },
     };
   }
 
@@ -165,7 +219,10 @@ async function answerQuery(
   // found genuinely relevant (validated against real IDs in llm.service.js).
   // This is the case that used to be a canned fallback with no data at all;
   // now it can surface real matching emails as cards, or an honest "none
-  // found" when matchingThreadIds is empty.
+  // found" when matchingThreadIds is empty. buildMailboxContext() already
+  // excludes boundary-protected threads before the LLM ever sees them, so
+  // matchingThreadIds can never reference one — skippedThreadsCount reports
+  // how many were hidden without exposing which.
   if (matchingThreadIds.length > 0) {
     const context = buildMailboxContext(realThreads, realMessages, currentUserEmail);
     const matchedThreads = context.threads.filter((t) =>
@@ -179,6 +236,7 @@ async function answerQuery(
         contacts: 0,
         attachments: 0,
       },
+      boundary: { skippedCount: context.skippedThreadsCount },
     };
   }
 
@@ -186,6 +244,7 @@ async function answerQuery(
     answer,
     data: null,
     accessed: { threads: 0, contacts: 0, attachments: 0 },
+    boundary: { skippedCount: 0 },
   };
 }
 

@@ -1,4 +1,5 @@
 const mailbox = require('../data/mailbox.mock.json');
+const { getEnforcementForThread } = require('./boundary.service');
 
 // Simple pattern set standing in for LLM-based commitment extraction.
 // Replace matchCommitmentPhrase() with an LLM call in a later milestone —
@@ -35,10 +36,14 @@ function cleanCommitmentText(body) {
     : text;
 }
 
-function getCommitmentsFromMock() {
+// Threads under a "complete_exclusion" boundary rule never contribute a
+// commitment, unless `includeExcluded` is set — same contract as
+// getWaitingOn() in waiting-on.service.js.
+function getCommitmentsFromMock(includeExcluded) {
   const commitments = [];
 
   mailbox.threads.forEach((t) => {
+    if (!includeExcluded && getEnforcementForThread(t) === 'complete_exclusion') return;
     t.messages.forEach((m) => {
       if (m.from === mailbox.user.email && matchCommitmentPhrase(m.body)) {
         const recipient = m.to[0];
@@ -65,7 +70,12 @@ function getCommitmentsFromMock() {
  * shapes. `m.body` is already the real body-or-snippet-fallback text (see
  * GET_INBOX_THREADS) — no different handling needed here for that.
  */
-function getOutgoingCommitmentsFromReal(realThreads, realMessages, currentUserEmail) {
+function getOutgoingCommitmentsFromReal(
+  realThreads,
+  realMessages,
+  currentUserEmail,
+  includeExcluded
+) {
   const commitments = [];
   const threadById = new Map((realThreads || []).map((t) => [t.threadId, t]));
 
@@ -74,6 +84,9 @@ function getOutgoingCommitmentsFromReal(realThreads, realMessages, currentUserEm
       return;
     }
     const thread = threadById.get(m.threadId);
+    if (thread && !includeExcluded && getEnforcementForThread(thread) === 'complete_exclusion') {
+      return;
+    }
     const recipientEmail = m.toEmails && m.toEmails[0];
     const participant =
       thread &&
@@ -100,7 +113,12 @@ function getOutgoingCommitmentsFromReal(realThreads, realMessages, currentUserEm
  * what the user promised them. Same phrase-matching rule, just flipped
  * sender/recipient roles.
  */
-function getIncomingCommitmentsFromReal(realThreads, realMessages, currentUserEmail) {
+function getIncomingCommitmentsFromReal(
+  realThreads,
+  realMessages,
+  currentUserEmail,
+  includeExcluded
+) {
   const commitments = [];
   const threadById = new Map((realThreads || []).map((t) => [t.threadId, t]));
 
@@ -110,6 +128,9 @@ function getIncomingCommitmentsFromReal(realThreads, realMessages, currentUserEm
       return;
     }
     const thread = threadById.get(m.threadId);
+    if (thread && !includeExcluded && getEnforcementForThread(thread) === 'complete_exclusion') {
+      return;
+    }
     const sender =
       thread &&
       (thread.participantDetails || []).find((p) => p.email === m.fromEmail);
@@ -127,10 +148,10 @@ function getIncomingCommitmentsFromReal(realThreads, realMessages, currentUserEm
   return commitments;
 }
 
-function getCommitmentsFromReal(realThreads, realMessages, currentUserEmail) {
+function getCommitmentsFromReal(realThreads, realMessages, currentUserEmail, includeExcluded) {
   return [
-    ...getOutgoingCommitmentsFromReal(realThreads, realMessages, currentUserEmail),
-    ...getIncomingCommitmentsFromReal(realThreads, realMessages, currentUserEmail),
+    ...getOutgoingCommitmentsFromReal(realThreads, realMessages, currentUserEmail, includeExcluded),
+    ...getIncomingCommitmentsFromReal(realThreads, realMessages, currentUserEmail, includeExcluded),
   ];
 }
 
@@ -138,12 +159,15 @@ function getCommitmentsFromReal(realThreads, realMessages, currentUserEmail) {
  * realThreads undefined (key genuinely absent — old/transitional clients)
  * falls back to mock. Same rule as buildMailboxContext: an explicit []
  * is real data that found nothing, and must NOT fall back to mock.
+ *
+ * `includeExcluded` (default false) controls whether boundary-protected
+ * threads are dropped — same contract as getWaitingOn().
  */
-function getCommitments(realThreads, realMessages, currentUserEmail) {
+function getCommitments(realThreads, realMessages, currentUserEmail, { includeExcluded = false } = {}) {
   if (realThreads !== undefined) {
-    return getCommitmentsFromReal(realThreads, realMessages, currentUserEmail);
+    return getCommitmentsFromReal(realThreads, realMessages, currentUserEmail, includeExcluded);
   }
-  return getCommitmentsFromMock();
+  return getCommitmentsFromMock(includeExcluded);
 }
 
 module.exports = { getCommitments };

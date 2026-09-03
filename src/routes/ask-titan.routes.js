@@ -11,6 +11,12 @@ const {
   getAction,
   transition,
 } = require('../services/action-state.service');
+const {
+  createRule,
+  listRules,
+  deleteRule,
+  getEnforcementForContact,
+} = require('../services/boundary.service');
 
 const router = express.Router();
 const PREFIX = '/hack/juggadexe';
@@ -40,6 +46,28 @@ router.post(`${PREFIX}/ask-titan/query`, async (req, res) => {
     // already handled on the frontend for exactly this response shape.
     return res.status(503).json({ error: err.code || 'AI_UNAVAILABLE' });
   }
+});
+
+// --- Boundary rules ("No-Go Zones") ---
+
+router.get(`${PREFIX}/boundary-rules`, (_req, res) => {
+  res.json({ items: listRules() });
+});
+
+router.post(`${PREFIX}/boundary-rules`, (req, res) => {
+  const { ruleType, value, enforcementMode } = req.body || {};
+  try {
+    const rule = createRule({ ruleType, value, enforcementMode });
+    return res.status(201).json(rule);
+  } catch (err) {
+    return res.status(400).json({ error: err.code || 'INVALID_RULE', message: err.message });
+  }
+});
+
+router.delete(`${PREFIX}/boundary-rules/:id`, (req, res) => {
+  const deleted = deleteRule(req.params.id);
+  if (!deleted) return res.status(404).json({ error: 'RULE_NOT_FOUND' });
+  return res.status(204).end();
 });
 
 router.get(`${PREFIX}/waiting-on`, (_req, res) => {
@@ -110,6 +138,15 @@ router.post(`${PREFIX}/actions`, (req, res) => {
   transition(action.id, 'PLANNED');
   transition(action.id, 'SECURITY_CHECK');
 
+  // A "complete_exclusion" or "search_only" boundary rule blocks drafting
+  // outright — Titan is never allowed to prepare an action for this contact,
+  // regardless of what the (still-run, for consistency) security guardrail
+  // finds. "no_external_actions" is checked again at approve-time instead,
+  // since drafting is explicitly allowed under that mode.
+  const boundaryMode = getEnforcementForContact(personEmail);
+  const boundaryBlocksDraft =
+    boundaryMode === 'complete_exclusion' || boundaryMode === 'search_only';
+
   const security = evaluateActionSafely({
     recipient: personEmail,
     body: draft.body,
@@ -118,11 +155,20 @@ router.post(`${PREFIX}/actions`, (req, res) => {
     senderEmail,
   });
 
-  const nextState = security.risk === 'high' || security.blocked ? 'BLOCKED' : 'AWAITING_APPROVAL';
+  const nextState =
+    boundaryBlocksDraft || security.risk === 'high' || security.blocked
+      ? 'BLOCKED'
+      : 'AWAITING_APPROVAL';
+  const boundaryReasons = boundaryBlocksDraft
+    ? [
+        `This contact is protected by an active boundary rule (${boundaryMode}). Titan cannot draft or send to this recipient.`,
+      ]
+    : [];
+
   transition(action.id, nextState, {
-    riskLevel: security.risk,
-    riskScore: security.riskScore,
-    reasons: security.reasons,
+    riskLevel: boundaryBlocksDraft ? 'high' : security.risk,
+    riskScore: boundaryBlocksDraft ? 100 : security.riskScore,
+    reasons: [...boundaryReasons, ...security.reasons],
   });
 
   res.status(201).json(getAction(action.id));
@@ -149,6 +195,21 @@ router.post(`${PREFIX}/actions/:id/approve`, (req, res) => {
 
   try {
     transition(action.id, 'APPROVED', { approvedByIdempotencyKey: idempotencyKey || null });
+
+    // Re-checked here, not just at draft-time — a boundary rule may have
+    // been added after this action was already approved. "no_external_actions"
+    // permits the draft (already past that point) but never the send.
+    const boundaryMode = getEnforcementForContact(action.payload.to);
+    if (boundaryMode === 'no_external_actions') {
+      transition(action.id, 'BLOCKED', {
+        reasons: [
+          ...action.reasons,
+          'Sending is blocked for this recipient by an active "No External Actions" boundary rule.',
+        ],
+      });
+      return res.json(getAction(action.id));
+    }
+
     transition(action.id, 'EXECUTING');
     // MVP: no real send integration yet — mark completed immediately.
     // This is the one line to replace with a real Titan sendEmail call.

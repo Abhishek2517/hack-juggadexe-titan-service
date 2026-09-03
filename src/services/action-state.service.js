@@ -9,7 +9,11 @@ const TRANSITIONS = {
   PLANNED: ['SECURITY_CHECK', 'FAILED'],
   SECURITY_CHECK: ['AWAITING_APPROVAL', 'BLOCKED', 'FAILED'],
   AWAITING_APPROVAL: ['APPROVED', 'CANCELLED', 'EXPIRED'],
-  APPROVED: ['EXECUTING'],
+  // BLOCKED is reachable from APPROVED, not just SECURITY_CHECK: a boundary
+  // rule is re-checked at send-time (it may have been added after this
+  // action was already approved), and can still stop an approved action
+  // before it executes.
+  APPROVED: ['EXECUTING', 'BLOCKED'],
   EXECUTING: ['COMPLETED', 'FAILED'],
   // Terminal states — no outgoing transitions.
   COMPLETED: [],

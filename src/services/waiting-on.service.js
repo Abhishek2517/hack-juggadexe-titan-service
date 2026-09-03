@@ -1,4 +1,5 @@
 const mailbox = require('../data/mailbox.mock.json');
+const { filterExcludedThreads, getEnforcementForThread } = require('./boundary.service');
 
 // Mock data's dates are all relative to this fixed anchor. Real data uses
 // the actual current time instead (see getWaitingOnFromReal).
@@ -64,10 +65,16 @@ function findLatestMessageBodyFrom(messages, threadId, fromEmail) {
 /**
  * A thread counts as "waiting on" when the user sent the last message
  * and no one has replied since. This is deterministic — no LLM needed.
+ *
+ * Threads under a "complete_exclusion" boundary rule are dropped before
+ * they're ever mapped/returned, unless `includeExcluded` is set — used only
+ * by callers that need the pre-filter count (e.g. the Ask Titan boundary
+ * banner), never to surface excluded content itself.
  */
-function getWaitingOnFromMock() {
-  return mailbox.threads
-    .filter((t) => t.lastReplyFrom === mailbox.user.email)
+function getWaitingOnFromMock(includeExcluded) {
+  let threads = mailbox.threads.filter((t) => t.lastReplyFrom === mailbox.user.email);
+  if (!includeExcluded) threads = filterExcludedThreads(threads);
+  return threads
     .map((t) => {
       const lastMsg = t.messages[t.messages.length - 1];
       const otherPerson = t.participants.find((p) => p !== mailbox.user.email);
@@ -102,10 +109,18 @@ function getWaitingOnFromMock() {
  * up "the user's most recent message in this thread" here can't drift to
  * the wrong message.
  */
-function getWaitingOnFromThreadTimestamps(realThreads, realMessages, currentUserEmail) {
+function getWaitingOnFromThreadTimestamps(
+  realThreads,
+  realMessages,
+  currentUserEmail,
+  includeExcluded
+) {
   const now = new Date();
   return (realThreads || [])
     .filter((t) => {
+      if (!includeExcluded && getEnforcementForThread(t) === 'complete_exclusion') {
+        return false;
+      }
       if (!t.lastMessageSentTimestamp) return false;
       if (!t.lastMessageReceivedTimestamp) return true;
       return (
@@ -143,7 +158,12 @@ function getWaitingOnFromThreadTimestamps(realThreads, realMessages, currentUser
  * lastMessageReceivedTimestamp, compared against this specific message's
  * own date rather than the thread-level lastMessageSentTimestamp.
  */
-function getWaitingOnFromRecentMessages(realThreads, realMessages, currentUserEmail) {
+function getWaitingOnFromRecentMessages(
+  realThreads,
+  realMessages,
+  currentUserEmail,
+  includeExcluded
+) {
   const now = new Date();
   const threadById = new Map((realThreads || []).map((t) => [t.threadId, t]));
 
@@ -161,6 +181,7 @@ function getWaitingOnFromRecentMessages(realThreads, realMessages, currentUserEm
 
     const thread = threadById.get(m.threadId);
     if (!thread) return;
+    if (!includeExcluded && getEnforcementForThread(thread) === 'complete_exclusion') return;
 
     const noReplySince =
       !thread.lastMessageReceivedTimestamp ||
@@ -187,17 +208,19 @@ function getWaitingOnFromRecentMessages(realThreads, realMessages, currentUserEm
   return results;
 }
 
-function getWaitingOnFromReal(realThreads, realMessages, currentUserEmail) {
+function getWaitingOnFromReal(realThreads, realMessages, currentUserEmail, includeExcluded) {
   const fromThreads = getWaitingOnFromThreadTimestamps(
     realThreads,
     realMessages,
-    currentUserEmail
+    currentUserEmail,
+    includeExcluded
   );
   const alreadyFound = new Set(fromThreads.map((w) => w.threadId));
   const fromMessages = getWaitingOnFromRecentMessages(
     realThreads,
     realMessages,
-    currentUserEmail
+    currentUserEmail,
+    includeExcluded
   ).filter((w) => !alreadyFound.has(w.threadId));
 
   return [...fromThreads, ...fromMessages].sort(
@@ -209,12 +232,16 @@ function getWaitingOnFromReal(realThreads, realMessages, currentUserEmail) {
  * realThreads undefined (key genuinely absent — old/transitional clients)
  * falls back to mock. Same rule as buildMailboxContext: an explicit []
  * is real data that found nothing, and must NOT fall back to mock.
+ *
+ * `includeExcluded` (default false) controls whether boundary-protected
+ * threads are dropped — see getWaitingOnFromMock's own doc for why a caller
+ * would ever want the excluded ones (count-only, never content display).
  */
-function getWaitingOn(realThreads, realMessages, currentUserEmail) {
+function getWaitingOn(realThreads, realMessages, currentUserEmail, { includeExcluded = false } = {}) {
   if (realThreads !== undefined) {
-    return getWaitingOnFromReal(realThreads, realMessages, currentUserEmail);
+    return getWaitingOnFromReal(realThreads, realMessages, currentUserEmail, includeExcluded);
   }
-  return getWaitingOnFromMock();
+  return getWaitingOnFromMock(includeExcluded);
 }
 
 /**
@@ -234,10 +261,13 @@ function getWaitingOn(realThreads, realMessages, currentUserEmail) {
  * separate/conflicting filter, this is the same one getWaitingOn's
  * eligibility check already relies on, just for the opposite direction.
  */
-function getNeedsResponseFromReal(realThreads, realMessages, currentUserEmail) {
+function getNeedsResponseFromReal(realThreads, realMessages, currentUserEmail, includeExcluded) {
   const now = new Date();
   return (realThreads || [])
     .filter((t) => {
+      if (!includeExcluded && getEnforcementForThread(t) === 'complete_exclusion') {
+        return false;
+      }
       if (!t.lastMessageReceivedTimestamp) return false;
       if (!t.lastMessageSentTimestamp) return true;
       return (
@@ -273,9 +303,9 @@ function getNeedsResponseFromReal(realThreads, realMessages, currentUserEmail) {
     .sort((a, b) => a.daysWaiting - b.daysWaiting);
 }
 
-function getNeedsResponse(realThreads, realMessages, currentUserEmail) {
+function getNeedsResponse(realThreads, realMessages, currentUserEmail, { includeExcluded = false } = {}) {
   if (realThreads !== undefined) {
-    return getNeedsResponseFromReal(realThreads, realMessages, currentUserEmail);
+    return getNeedsResponseFromReal(realThreads, realMessages, currentUserEmail, includeExcluded);
   }
   return [];
 }

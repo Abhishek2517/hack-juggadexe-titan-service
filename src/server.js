@@ -1,3 +1,4 @@
+require('dotenv').config();
 const app = require('./app');
 
 // Local dev entrypoint (npm start). Vercel doesn't use this file at all —
