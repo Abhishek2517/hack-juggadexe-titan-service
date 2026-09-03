@@ -1,17 +1,7 @@
-const express = require('express');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const askTitanRoutes = require('./routes/ask-titan.routes');
+const app = require('./app');
 
-const app = express();
-app.disable('x-powered-by');
-app.use(cors());
-app.use(bodyParser.json({ limit: '5mb' }));
-
-app.use(askTitanRoutes);
-
-app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'juggadexe-titan-service' }));
-
+// Local dev entrypoint (npm start). Vercel doesn't use this file at all —
+// see api/index.js, which imports the same app but never calls .listen().
 const PORT = process.env.PORT || 4700;
 app.listen(PORT, () => {
   console.log(`juggadexe-titan-service listening on http://localhost:${PORT}`);
