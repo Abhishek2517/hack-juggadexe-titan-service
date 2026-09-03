@@ -177,12 +177,21 @@ async function answerQuery(
     const commitments = getCommitments(realThreads, realMessages, currentUserEmail);
     const urgent = waiting.filter((w) => w.urgency === 'high');
 
-    // Boundary-skip counts are computed pre-cap (needsResponseAll, not the
-    // capped/split view) so the digest cap never gets conflated with content
-    // a boundary rule actually redacted.
+    // Boundary-skip count is computed from cappedNeedsResponse, NOT
+    // needsResponseAll — this used to be the other way round (pre-cap,
+    // uncapped), back when a complete_exclusion match was dropped from the
+    // result entirely; the reasoning then was to keep "cut for space" (the
+    // digest cap) separate from "cut for privacy" (the boundary rule). Now
+    // that a match is redacted in place instead of dropped (see
+    // waiting-on.service.js), that reasoning inverts: a redacted item that
+    // happens to fall outside the top-N cap would still get COUNTED here
+    // but never actually RENDERED as a card (real or Protected) anywhere in
+    // the digest — an invisible number in the boundary notice with no
+    // card to match it. waiting/commitments have no cap, so they're
+    // unaffected; only needsResponse needed this fix.
     const skippedCount =
       boundaryContextFor(waiting).skippedCount +
-      boundaryContextFor(needsResponseAll).skippedCount +
+      boundaryContextFor(cappedNeedsResponse).skippedCount +
       boundaryContextFor(commitments).skippedCount;
 
     return {
