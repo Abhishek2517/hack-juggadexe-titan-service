@@ -201,27 +201,42 @@ test('getEnforcementForContact only evaluates contact/domain rules, never folder
   assert.equal(boundary.getEnforcementForContact('unrelated@abc.com'), null);
 });
 
-test('filterExcludedThreads drops only complete_exclusion matches', () => {
-  boundary.createRule({
-    ruleType: 'folder',
-    value: '/HR',
-    enforcementMode: 'complete_exclusion',
-  });
+test('getMatchingRuleForThread returns the strictest matching rule object, or null', () => {
   boundary.createRule({
     ruleType: 'domain',
     value: '*@vendor.com',
-    enforcementMode: 'search_only',
+    enforcementMode: 'no_external_actions',
   });
-  const threads = [
-    { threadId: 't1', folder: '/HR', participants: [], subject: '' },
-    { threadId: 't2', participants: ['x@vendor.com'], subject: '' },
-    { threadId: 't3', participants: [], subject: '' },
-  ];
-  const result = boundary.filterExcludedThreads(threads);
-  assert.deepEqual(
-    result.map((t) => t.threadId),
-    ['t2', 't3']
+  const strict = boundary.createRule({
+    ruleType: 'keyword',
+    value: 'confidential',
+    enforcementMode: 'complete_exclusion',
+  });
+  const thread = {
+    participants: ['priya@abc.com', 'x@vendor.com'],
+    subject: 'CONFIDENTIAL update',
+  };
+  assert.equal(boundary.getMatchingRuleForThread(thread).id, strict.id);
+  assert.equal(
+    boundary.getMatchingRuleForThread({ participants: [], subject: '' }),
+    null
   );
+});
+
+test('zoneLabelForRule strips the leading slash from a folder value and the *@ prefix from a domain value', () => {
+  assert.equal(
+    boundary.zoneLabelForRule({ ruleType: 'folder', value: '/HR/Compensation' }),
+    'HR/Compensation'
+  );
+  assert.equal(
+    boundary.zoneLabelForRule({ ruleType: 'domain', value: '*@legal-counsel.com' }),
+    'legal-counsel.com'
+  );
+  assert.equal(
+    boundary.zoneLabelForRule({ ruleType: 'contact', value: 'jane@med.com' }),
+    'jane@med.com'
+  );
+  assert.equal(boundary.zoneLabelForRule(null), null);
 });
 
 test('deleteRule removes a rule so it no longer matches', () => {

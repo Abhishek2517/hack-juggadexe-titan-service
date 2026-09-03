@@ -1,5 +1,5 @@
 const mailbox = require('../data/mailbox.mock.json');
-const { getEnforcementForThread } = require('./boundary.service');
+const { getMatchingRuleForThread, zoneLabelForRule } = require('./boundary.service');
 
 // Simple pattern set standing in for LLM-based commitment extraction.
 // Replace matchCommitmentPhrase() with an LLM call in a later milestone —
@@ -36,16 +36,36 @@ function cleanCommitmentText(body) {
     : text;
 }
 
-// Threads under a "complete_exclusion" boundary rule never contribute a
-// commitment, unless `includeExcluded` is set — same contract as
-// getWaitingOn() in waiting-on.service.js.
-function getCommitmentsFromMock(includeExcluded) {
+// A No-Go Zone commitment, redacted in place rather than dropped — same
+// reasoning as redactedItem in waiting-on.service.js: a promise made (or
+// owed) in a protected zone still shows up, just without the subject,
+// person, or commitment text itself. zoneLabel comes from the rule's own
+// configured value, never from the thread/message content.
+function redactedCommitment(threadId, direction, rule) {
+  return {
+    threadId,
+    status: 'pending',
+    direction,
+    redacted: true,
+    zoneLabel: zoneLabelForRule(rule),
+  };
+}
+
+// A thread under a "complete_exclusion" boundary rule still contributes a
+// commitment entry — redacted in place (redactedCommitment above) rather
+// than dropped, so a promise in a protected zone can't silently vanish.
+function getCommitmentsFromMock() {
   const commitments = [];
 
   mailbox.threads.forEach((t) => {
-    if (!includeExcluded && getEnforcementForThread(t) === 'complete_exclusion') return;
+    const rule = getMatchingRuleForThread(t);
+    const isExcluded = Boolean(rule && rule.enforcementMode === 'complete_exclusion');
     t.messages.forEach((m) => {
       if (m.from === mailbox.user.email && matchCommitmentPhrase(m.body)) {
+        if (isExcluded) {
+          commitments.push(redactedCommitment(t.threadId, 'outgoing', rule));
+          return;
+        }
         const recipient = m.to[0];
         const contact = mailbox.contacts[recipient];
         commitments.push({
@@ -56,6 +76,7 @@ function getCommitmentsFromMock(includeExcluded) {
           commitmentText: cleanCommitmentText(m.body),
           status: 'pending', // pending | overdue | completed — mocked for now
           direction: 'outgoing', // outgoing = you promised them; incoming = they promised you
+          redacted: false,
         });
       }
     });
@@ -70,12 +91,7 @@ function getCommitmentsFromMock(includeExcluded) {
  * shapes. `m.body` is already the real body-or-snippet-fallback text (see
  * GET_INBOX_THREADS) — no different handling needed here for that.
  */
-function getOutgoingCommitmentsFromReal(
-  realThreads,
-  realMessages,
-  currentUserEmail,
-  includeExcluded
-) {
+function getOutgoingCommitmentsFromReal(realThreads, realMessages, currentUserEmail) {
   const commitments = [];
   const threadById = new Map((realThreads || []).map((t) => [t.threadId, t]));
 
@@ -84,7 +100,9 @@ function getOutgoingCommitmentsFromReal(
       return;
     }
     const thread = threadById.get(m.threadId);
-    if (thread && !includeExcluded && getEnforcementForThread(thread) === 'complete_exclusion') {
+    const rule = thread ? getMatchingRuleForThread(thread) : null;
+    if (rule && rule.enforcementMode === 'complete_exclusion') {
+      commitments.push(redactedCommitment(m.threadId, 'outgoing', rule));
       return;
     }
     const recipientEmail = m.toEmails && m.toEmails[0];
@@ -101,6 +119,7 @@ function getOutgoingCommitmentsFromReal(
       commitmentText: cleanCommitmentText(m.body),
       status: 'pending', // pending | overdue | completed — mocked for now
       direction: 'outgoing',
+      redacted: false,
     });
   });
 
@@ -113,12 +132,7 @@ function getOutgoingCommitmentsFromReal(
  * what the user promised them. Same phrase-matching rule, just flipped
  * sender/recipient roles.
  */
-function getIncomingCommitmentsFromReal(
-  realThreads,
-  realMessages,
-  currentUserEmail,
-  includeExcluded
-) {
+function getIncomingCommitmentsFromReal(realThreads, realMessages, currentUserEmail) {
   const commitments = [];
   const threadById = new Map((realThreads || []).map((t) => [t.threadId, t]));
 
@@ -128,7 +142,9 @@ function getIncomingCommitmentsFromReal(
       return;
     }
     const thread = threadById.get(m.threadId);
-    if (thread && !includeExcluded && getEnforcementForThread(thread) === 'complete_exclusion') {
+    const rule = thread ? getMatchingRuleForThread(thread) : null;
+    if (rule && rule.enforcementMode === 'complete_exclusion') {
+      commitments.push(redactedCommitment(m.threadId, 'incoming', rule));
       return;
     }
     const sender =
@@ -142,16 +158,17 @@ function getIncomingCommitmentsFromReal(
       commitmentText: cleanCommitmentText(m.body),
       status: 'pending', // pending | overdue | completed — mocked for now
       direction: 'incoming',
+      redacted: false,
     });
   });
 
   return commitments;
 }
 
-function getCommitmentsFromReal(realThreads, realMessages, currentUserEmail, includeExcluded) {
+function getCommitmentsFromReal(realThreads, realMessages, currentUserEmail) {
   return [
-    ...getOutgoingCommitmentsFromReal(realThreads, realMessages, currentUserEmail, includeExcluded),
-    ...getIncomingCommitmentsFromReal(realThreads, realMessages, currentUserEmail, includeExcluded),
+    ...getOutgoingCommitmentsFromReal(realThreads, realMessages, currentUserEmail),
+    ...getIncomingCommitmentsFromReal(realThreads, realMessages, currentUserEmail),
   ];
 }
 
@@ -160,14 +177,15 @@ function getCommitmentsFromReal(realThreads, realMessages, currentUserEmail, inc
  * falls back to mock. Same rule as buildMailboxContext: an explicit []
  * is real data that found nothing, and must NOT fall back to mock.
  *
- * `includeExcluded` (default false) controls whether boundary-protected
- * threads are dropped — same contract as getWaitingOn().
+ * A thread under a "complete_exclusion" boundary rule comes back redacted
+ * (see redactedCommitment above) rather than dropped — same contract as
+ * getWaitingOn() in waiting-on.service.js.
  */
-function getCommitments(realThreads, realMessages, currentUserEmail, { includeExcluded = false } = {}) {
+function getCommitments(realThreads, realMessages, currentUserEmail) {
   if (realThreads !== undefined) {
-    return getCommitmentsFromReal(realThreads, realMessages, currentUserEmail, includeExcluded);
+    return getCommitmentsFromReal(realThreads, realMessages, currentUserEmail);
   }
-  return getCommitmentsFromMock(includeExcluded);
+  return getCommitmentsFromMock();
 }
 
 module.exports = { getCommitments };

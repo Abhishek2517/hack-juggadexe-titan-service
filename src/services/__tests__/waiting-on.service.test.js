@@ -15,41 +15,39 @@ test('returns all waiting threads when no boundary rules exist', () => {
   );
 });
 
-test('a complete_exclusion folder rule removes the matching thread from the result', () => {
+test('a complete_exclusion folder rule redacts the matching thread instead of removing it', () => {
   boundary.createRule({
     ruleType: 'folder',
     value: '/HR/Compensation',
     enforcementMode: 'complete_exclusion',
   });
   const items = getWaitingOn();
-  assert.equal(
-    items.some((i) => i.threadId === 't4'),
-    false
-  );
+  const item = items.find((i) => i.threadId === 't4');
+  assert.ok(item, 'redacted item must still be present, not dropped');
+  assert.equal(item.redacted, true);
+  assert.equal(item.zoneLabel, 'HR/Compensation');
+  assert.equal(item.subject, undefined);
+  assert.equal(item.waitingOn, undefined);
+  assert.equal(item.waitingOnEmail, undefined);
+  assert.equal(typeof item.daysWaiting, 'number');
+  assert.ok(['low', 'medium', 'high'].includes(item.urgency));
 });
 
-test('includeExcluded:true still returns the excluded thread, for counting only', () => {
-  boundary.createRule({
-    ruleType: 'folder',
-    value: '/HR/Compensation',
-    enforcementMode: 'complete_exclusion',
-  });
-  const items = getWaitingOn(undefined, undefined, undefined, { includeExcluded: true });
-  assert.equal(
-    items.some((i) => i.threadId === 't4'),
-    true
-  );
+test('a non-redacted item is explicitly marked redacted: false', () => {
+  const items = getWaitingOn();
+  const item = items.find((i) => i.threadId === 't4');
+  assert.equal(item.redacted, false);
 });
 
-test('a search_only rule does not remove the thread — search stays allowed', () => {
+test('a search_only rule does not redact the thread — search stays allowed', () => {
   boundary.createRule({
     ruleType: 'folder',
     value: '/HR/Compensation',
     enforcementMode: 'search_only',
   });
   const items = getWaitingOn();
-  assert.equal(
-    items.some((i) => i.threadId === 't4'),
-    true
-  );
+  const item = items.find((i) => i.threadId === 't4');
+  assert.ok(item);
+  assert.equal(item.redacted, false);
+  assert.equal(item.subject !== undefined, true);
 });

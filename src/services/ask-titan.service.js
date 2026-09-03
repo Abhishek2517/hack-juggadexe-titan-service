@@ -16,6 +16,11 @@ const ATTENTION_DIGEST_NEEDS_RESPONSE_LIMIT = 10;
  * written during classification against Inbox-only grounding context and so
  * can't see Sent-derived waits merged in afterward (see the waiting_on
  * branch below).
+ *
+ * `waiting` must already exclude redacted items — a No-Go Zone item's
+ * waitingOn/subject fields don't exist on it (see redactedItem in
+ * waiting-on.service.js), so naming it here would either crash or leak a
+ * blank/undefined name into the answer text.
  */
 function buildWaitingOnAnswer(waiting) {
   if (waiting.length === 0) {
@@ -33,12 +38,16 @@ function buildWaitingOnAnswer(waiting) {
   return `You are waiting on responses from ${namesText}.`;
 }
 
-// How many items a boundary rule hid from this answer. Deliberately just a
-// count — never a subject line, sender, or any other content for the
-// skipped items themselves (Privacy Integrity Rule: enforced by this shape,
-// not by UI discipline downstream).
-function boundaryContextFor(filteredLength, unfilteredLength) {
-  return { skippedCount: Math.max(0, unfilteredLength - filteredLength) };
+// How many items in this answer a boundary rule redacted. Deliberately just
+// a count — never a subject line, sender, or any other content for the
+// redacted items themselves (Privacy Integrity Rule: enforced by this shape,
+// not by UI discipline downstream). getWaitingOn/getNeedsResponse/
+// getCommitments now redact complete_exclusion matches in place rather than
+// dropping them (see waiting-on.service.js), so this just tallies the
+// `redacted: true` items already in the result — no second, excluded-included
+// recount fetch needed any more.
+function boundaryContextFor(items) {
+  return { skippedCount: items.filter((item) => item.redacted).length };
 }
 
 /**
@@ -48,10 +57,8 @@ function boundaryContextFor(filteredLength, unfilteredLength) {
  * deterministic functions, same separation of concerns as the security
  * guardrail: AI reasons, rules/code supply the actual data.
  *
- * Every category also reports `boundary.skippedCount` — how many items a
- * boundary rule hid from this specific answer, computed by comparing the
- * normal (excluded) result against an includeExcluded:true recount. This is
- * always a count-only recount, never a second, unfiltered payload.
+ * Every category also reports `boundary.skippedCount` — how many items in
+ * this specific answer a boundary rule redacted (see boundaryContextFor).
  */
 async function answerQuery(
   query,
@@ -86,22 +93,16 @@ async function answerQuery(
     const waitingMessages =
       realThreads !== undefined ? [...(realMessages || []), ...(sentMessages || [])] : undefined;
     const waiting = getWaitingOn(waitingThreads, waitingMessages, currentUserEmail);
-    const allWaiting = getWaitingOn(waitingThreads, waitingMessages, currentUserEmail, {
-      includeExcluded: true,
-    });
     return {
-      answer: buildWaitingOnAnswer(waiting),
+      answer: buildWaitingOnAnswer(waiting.filter((w) => !w.redacted)),
       data: waiting,
       accessed: { threads: waiting.length, contacts: waiting.length, attachments: 0 },
-      boundary: boundaryContextFor(waiting.length, allWaiting.length),
+      boundary: boundaryContextFor(waiting),
     };
   }
 
   if (category === 'needs_response') {
     const needsResponse = getNeedsResponse(realThreads, realMessages, currentUserEmail);
-    const allNeedsResponse = getNeedsResponse(realThreads, realMessages, currentUserEmail, {
-      includeExcluded: true,
-    });
     return {
       answer,
       data: needsResponse,
@@ -110,15 +111,12 @@ async function answerQuery(
         contacts: needsResponse.length,
         attachments: 0,
       },
-      boundary: boundaryContextFor(needsResponse.length, allNeedsResponse.length),
+      boundary: boundaryContextFor(needsResponse),
     };
   }
 
   if (category === 'commitments') {
     const commitments = getCommitments(realThreads, realMessages, currentUserEmail);
-    const allCommitments = getCommitments(realThreads, realMessages, currentUserEmail, {
-      includeExcluded: true,
-    });
     return {
       answer,
       data: commitments,
@@ -127,7 +125,7 @@ async function answerQuery(
         contacts: commitments.length,
         attachments: 0,
       },
-      boundary: boundaryContextFor(commitments.length, allCommitments.length),
+      boundary: boundaryContextFor(commitments),
     };
   }
 
@@ -148,18 +146,11 @@ async function answerQuery(
     // has a pattern for telling these apart per-item (see AskTitanContent's
     // data-shape checks), so this flat array mixes both, same as how
     // AttentionDigest's own Urgent section already renders urgent/
-    // urgentNeedsResponse side by side.
+    // urgentNeedsResponse side by side. A redacted item that's still
+    // high-urgency (urgency is computed before redaction — see
+    // waiting-on.service.js) stays in this list, same as any other urgent
+    // item — that's the whole point of redact-instead-of-remove.
     const merged = [...urgentWaiting, ...urgentNeedsResponse];
-
-    const allWaiting = getWaitingOn(realThreads, realMessages, currentUserEmail, {
-      includeExcluded: true,
-    });
-    const allNeedsResponse = getNeedsResponse(realThreads, realMessages, currentUserEmail, {
-      includeExcluded: true,
-    });
-    const allMergedUrgentCount =
-      allWaiting.filter((w) => w.urgency === 'high').length +
-      allNeedsResponse.filter((n) => n.urgency === 'high').length;
 
     return {
       answer,
@@ -169,7 +160,7 @@ async function answerQuery(
         contacts: merged.length,
         attachments: 0,
       },
-      boundary: boundaryContextFor(merged.length, allMergedUrgentCount),
+      boundary: boundaryContextFor(merged),
     };
   }
 
@@ -186,22 +177,13 @@ async function answerQuery(
     const commitments = getCommitments(realThreads, realMessages, currentUserEmail);
     const urgent = waiting.filter((w) => w.urgency === 'high');
 
-    // Boundary-skip counts are computed pre-cap (needsResponseAll vs its own
-    // includeExcluded:true recount) so the digest cap never gets conflated
-    // with content a boundary rule actually hid.
-    const allWaiting = getWaitingOn(realThreads, realMessages, currentUserEmail, {
-      includeExcluded: true,
-    });
-    const allNeedsResponse = getNeedsResponse(realThreads, realMessages, currentUserEmail, {
-      includeExcluded: true,
-    });
-    const allCommitments = getCommitments(realThreads, realMessages, currentUserEmail, {
-      includeExcluded: true,
-    });
+    // Boundary-skip counts are computed pre-cap (needsResponseAll, not the
+    // capped/split view) so the digest cap never gets conflated with content
+    // a boundary rule actually redacted.
     const skippedCount =
-      boundaryContextFor(waiting.length, allWaiting.length).skippedCount +
-      boundaryContextFor(needsResponseAll.length, allNeedsResponse.length).skippedCount +
-      boundaryContextFor(commitments.length, allCommitments.length).skippedCount;
+      boundaryContextFor(waiting).skippedCount +
+      boundaryContextFor(needsResponseAll).skippedCount +
+      boundaryContextFor(commitments).skippedCount;
 
     return {
       answer,

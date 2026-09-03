@@ -65,14 +65,30 @@ function buildMailboxContext(realThreads, realMessages, currentUserEmail) {
   // was provided — that's what caused the model to write mock names (John,
   // ABC Corp) into its prose regardless of the real data. Must use the same
   // real/mock selection as the threads above.
+  //
+  // getWaitingOn/getNeedsResponse/getCommitments now redact complete_exclusion
+  // matches in place rather than dropping them (see waiting-on.service.js),
+  // so a matching item still comes back with `redacted: true` instead of
+  // being omitted. That's the right default for a digest a person reads, but
+  // the LLM must never see it at all — a redacted item still carries a
+  // zoneLabel and threadId, and the model has no way to know it's not allowed
+  // to reason about or mention those. Filter them out here, same as the
+  // `threads` hard filter above, so this stays a genuine access restriction
+  // for the model rather than a display-layer one.
   return {
-    waitingOn: getWaitingOn(realThreads, realMessages, currentUserEmail),
+    waitingOn: getWaitingOn(realThreads, realMessages, currentUserEmail).filter(
+      (item) => !item.redacted
+    ),
     // The reverse direction of waitingOn: threads where someone else sent
     // the last message and the user hasn't replied — incoming asks/approvals
     // needing the user's own action, not things the user is chasing others
     // for. See getNeedsResponse in waiting-on.service.js.
-    needsResponse: getNeedsResponse(realThreads, realMessages, currentUserEmail),
-    commitments: getCommitments(realThreads, realMessages, currentUserEmail),
+    needsResponse: getNeedsResponse(realThreads, realMessages, currentUserEmail).filter(
+      (item) => !item.redacted
+    ),
+    commitments: getCommitments(realThreads, realMessages, currentUserEmail).filter(
+      (item) => !item.redacted
+    ),
     threads,
     skippedThreadsCount: rawThreads.length - visibleThreads.length,
   };
