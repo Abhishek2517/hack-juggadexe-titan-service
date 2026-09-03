@@ -1,0 +1,102 @@
+{
+  "user": {
+    "email": "priya@abc.com",
+    "name": "Priya"
+  },
+  "contacts": {
+    "john@vendor.com": { "name": "John", "relationshipMonths": 6, "domain": "vendor.com" },
+    "abc@customer.com": { "name": "ABC Corp", "relationshipMonths": 14, "domain": "customer.com" },
+    "sarah@partner.com": { "name": "Sarah", "relationshipMonths": 3, "domain": "partner.com" },
+    "raj@abc.com": { "name": "Raj", "relationshipMonths": 24, "domain": "abc.com" }
+  },
+  "threads": [
+    {
+      "threadId": "t1",
+      "subject": "Pricing confirmation",
+      "participants": ["priya@abc.com", "john@vendor.com"],
+      "messages": [
+        {
+          "id": "m1",
+          "from": "priya@abc.com",
+          "to": ["john@vendor.com"],
+          "sentAt": "2026-08-30T09:00:00Z",
+          "body": "Hi John, can you confirm the pricing for the Q3 order?"
+        }
+      ],
+      "lastReplyFrom": "priya@abc.com"
+    },
+    {
+      "threadId": "t2",
+      "subject": "Contract approval",
+      "participants": ["priya@abc.com", "abc@customer.com"],
+      "messages": [
+        {
+          "id": "m2",
+          "from": "priya@abc.com",
+          "to": ["abc@customer.com"],
+          "sentAt": "2026-08-31T10:00:00Z",
+          "body": "Hi team, please review and approve the attached contract when you get a chance."
+        }
+      ],
+      "lastReplyFrom": "priya@abc.com"
+    },
+    {
+      "threadId": "t3",
+      "subject": "Technical requirements",
+      "participants": ["priya@abc.com", "sarah@partner.com"],
+      "messages": [
+        {
+          "id": "m3",
+          "from": "priya@abc.com",
+          "to": ["sarah@partner.com"],
+          "sentAt": "2026-09-01T08:00:00Z",
+          "body": "Hey Sarah, could you send over the technical requirements doc?"
+        }
+      ],
+      "lastReplyFrom": "priya@abc.com"
+    },
+    {
+      "threadId": "t4",
+      "subject": "Q3 report",
+      "participants": ["priya@abc.com", "raj@abc.com"],
+      "messages": [
+        {
+          "id": "m4",
+          "from": "raj@abc.com",
+          "to": ["priya@abc.com"],
+          "sentAt": "2026-08-31T12:00:00Z",
+          "body": "Hi Priya, when do you think you can get the Q3 report over?"
+        },
+        {
+          "id": "m5",
+          "from": "priya@abc.com",
+          "to": ["raj@abc.com"],
+          "sentAt": "2026-08-31T12:30:00Z",
+          "body": "I'll send the report tomorrow, no problem."
+        }
+      ],
+      "lastReplyFrom": "priya@abc.com"
+    },
+    {
+      "threadId": "t5",
+      "subject": "Bank account update",
+      "participants": ["priya@abc.com", "john@vendor.com"],
+      "messages": [
+        {
+          "id": "m6",
+          "from": "john@vendor.com",
+          "to": ["priya@abc.com"],
+          "sentAt": "2026-09-01T15:00:00Z",
+          "body": "Hi Priya, our bank account has changed. Please send future payments to this new account: XXXX-1234."
+        }
+      ],
+      "lastReplyFrom": "john@vendor.com",
+      "isFirstRequestOfType": true
+    }
+  ],
+  "priorSendHistory": {
+    "invoice_attachment": {
+      "john@vendor.com": ["john@vendor.com"]
+    }
+  }
+}
