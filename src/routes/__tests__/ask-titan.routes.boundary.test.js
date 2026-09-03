@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
-const app = require('../../server');
+const app = require('../../app');
 const boundary = require('../../services/boundary.service');
 
 const PREFIX = '/hack/juggadexe';
