@@ -166,11 +166,23 @@ function strictestMode(modes) {
   );
 }
 
+// The single strictest rule matching a thread, or null — same resolution as
+// getEnforcementForThread, but returns the rule itself so a caller can build
+// a redacted placeholder from it (zoneLabelForRule) instead of just knowing
+// the mode.
+function getMatchingRuleForThread(thread) {
+  const matching = listRules().filter((rule) => ruleMatchesThread(rule, thread));
+  if (matching.length === 0) return null;
+  return matching.reduce((strictest, rule) =>
+    MODE_STRICTNESS[rule.enforcementMode] > MODE_STRICTNESS[strictest.enforcementMode]
+      ? rule
+      : strictest
+  );
+}
+
 function getEnforcementForThread(thread) {
-  const matchingModes = listRules()
-    .filter((rule) => ruleMatchesThread(rule, thread))
-    .map((rule) => rule.enforcementMode);
-  return strictestMode(matchingModes);
+  const rule = getMatchingRuleForThread(thread);
+  return rule ? rule.enforcementMode : null;
 }
 
 function getEnforcementForContact(email) {
@@ -180,10 +192,16 @@ function getEnforcementForContact(email) {
   return strictestMode(matchingModes);
 }
 
-function filterExcludedThreads(threads) {
-  return threads.filter(
-    (thread) => getEnforcementForThread(thread) !== 'complete_exclusion'
-  );
+// A short, human-readable label for a redacted item's placeholder — always
+// derived from the rule's OWN configured value (something the user typed in
+// themselves when creating the rule), never from the underlying thread's
+// content. That's what keeps "redact instead of remove" honest: the zone
+// name was never secret, only the mail inside it is.
+function zoneLabelForRule(rule) {
+  if (!rule) return null;
+  if (rule.ruleType === 'folder') return rule.value.replace(/^\//, '');
+  if (rule.ruleType === 'domain') return rule.value.replace(/^\*@/, '');
+  return rule.value;
 }
 
 module.exports = {
@@ -192,7 +210,8 @@ module.exports = {
   deleteRule,
   getEnforcementForThread,
   getEnforcementForContact,
-  filterExcludedThreads,
+  getMatchingRuleForThread,
+  zoneLabelForRule,
   RULE_TYPES,
   ENFORCEMENT_MODES,
 };

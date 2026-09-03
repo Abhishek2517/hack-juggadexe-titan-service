@@ -1,5 +1,5 @@
 const mailbox = require('../data/mailbox.mock.json');
-const { filterExcludedThreads, getEnforcementForThread } = require('./boundary.service');
+const { getMatchingRuleForThread, zoneLabelForRule } = require('./boundary.service');
 
 // Mock data's dates are all relative to this fixed anchor. Real data uses
 // the actual current time instead (see getWaitingOnFromReal).
@@ -50,6 +50,26 @@ function computeUrgency(days, pendingText) {
 }
 
 /**
+ * A No-Go Zone item, redacted in place rather than dropped: the thread still
+ * shows up (so it can't silently vanish from something the user needs to
+ * act on — e.g. an offer letter waiting in an HR folder), but subject/
+ * person/email are stripped. daysWaiting and urgency are computed from the
+ * real content BEFORE this function is called and passed straight through —
+ * urgency itself carries no PII, only a signal that something needs a look.
+ * zoneLabel comes from the rule's own configured value (zoneLabelForRule),
+ * never from the thread — see that function's doc comment.
+ */
+function redactedItem(threadId, daysWaiting, urgency, rule) {
+  return {
+    threadId,
+    daysWaiting,
+    urgency,
+    redacted: true,
+    zoneLabel: zoneLabelForRule(rule),
+  };
+}
+
+/**
  * Most recent message in `messages` for `threadId` sent by `fromEmail`,
  * HTML-stripped. Returns '' (not found) when the specific message isn't in
  * the local-cache batch we have — callers fall back to the thread's own
@@ -66,30 +86,34 @@ function findLatestMessageBodyFrom(messages, threadId, fromEmail) {
  * A thread counts as "waiting on" when the user sent the last message
  * and no one has replied since. This is deterministic — no LLM needed.
  *
- * Threads under a "complete_exclusion" boundary rule are dropped before
- * they're ever mapped/returned, unless `includeExcluded` is set — used only
- * by callers that need the pre-filter count (e.g. the Ask Titan boundary
- * banner), never to surface excluded content itself.
+ * A thread under a "complete_exclusion" boundary rule still appears in the
+ * result — it's redacted in place (redactedItem above) rather than dropped,
+ * so it can't silently disappear from something the user needs to act on.
  */
-function getWaitingOnFromMock(includeExcluded) {
-  let threads = mailbox.threads.filter((t) => t.lastReplyFrom === mailbox.user.email);
-  if (!includeExcluded) threads = filterExcludedThreads(threads);
+function getWaitingOnFromMock() {
+  const threads = mailbox.threads.filter((t) => t.lastReplyFrom === mailbox.user.email);
   return threads
     .map((t) => {
       const lastMsg = t.messages[t.messages.length - 1];
-      const otherPerson = t.participants.find((p) => p !== mailbox.user.email);
-      const contact = mailbox.contacts[otherPerson];
       const days = daysSince(lastMsg.sentAt, MOCK_NOW);
       // lastMsg is guaranteed to be the user's own message here (that's
       // what the filter above requires) — the correct "pending message" to
       // scan for urgent language in this direction.
+      const urgency = computeUrgency(days, stripHtml(lastMsg.body || ''));
+      const rule = getMatchingRuleForThread(t);
+      if (rule && rule.enforcementMode === 'complete_exclusion') {
+        return redactedItem(t.threadId, days, urgency, rule);
+      }
+      const otherPerson = t.participants.find((p) => p !== mailbox.user.email);
+      const contact = mailbox.contacts[otherPerson];
       return {
         threadId: t.threadId,
         subject: t.subject,
         waitingOn: contact ? contact.name : otherPerson,
         waitingOnEmail: otherPerson,
         daysWaiting: days,
-        urgency: computeUrgency(days, stripHtml(lastMsg.body || '')),
+        urgency,
+        redacted: false,
       };
     })
     .sort((a, b) => b.daysWaiting - a.daysWaiting);
@@ -109,18 +133,10 @@ function getWaitingOnFromMock(includeExcluded) {
  * up "the user's most recent message in this thread" here can't drift to
  * the wrong message.
  */
-function getWaitingOnFromThreadTimestamps(
-  realThreads,
-  realMessages,
-  currentUserEmail,
-  includeExcluded
-) {
+function getWaitingOnFromThreadTimestamps(realThreads, realMessages, currentUserEmail) {
   const now = new Date();
   return (realThreads || [])
     .filter((t) => {
-      if (!includeExcluded && getEnforcementForThread(t) === 'complete_exclusion') {
-        return false;
-      }
       if (!t.lastMessageSentTimestamp) return false;
       if (!t.lastMessageReceivedTimestamp) return true;
       return (
@@ -129,20 +145,26 @@ function getWaitingOnFromThreadTimestamps(
       );
     })
     .map((t) => {
-      const other = (t.participantDetails || []).find(
-        (p) => p.email !== currentUserEmail
-      );
       const days = daysSince(t.lastMessageSentTimestamp, now);
       const pendingText =
         findLatestMessageBodyFrom(realMessages, t.threadId, currentUserEmail) ||
         stripHtml(t.snippet || '');
+      const urgency = computeUrgency(days, pendingText);
+      const rule = getMatchingRuleForThread(t);
+      if (rule && rule.enforcementMode === 'complete_exclusion') {
+        return redactedItem(t.threadId, days, urgency, rule);
+      }
+      const other = (t.participantDetails || []).find(
+        (p) => p.email !== currentUserEmail
+      );
       return {
         threadId: t.threadId,
         subject: t.subject,
         waitingOn: other ? other.name : t.sender || 'Unknown',
         waitingOnEmail: other ? other.email : '',
         daysWaiting: days,
-        urgency: computeUrgency(days, pendingText),
+        urgency,
+        redacted: false,
       };
     });
 }
@@ -158,12 +180,7 @@ function getWaitingOnFromThreadTimestamps(
  * lastMessageReceivedTimestamp, compared against this specific message's
  * own date rather than the thread-level lastMessageSentTimestamp.
  */
-function getWaitingOnFromRecentMessages(
-  realThreads,
-  realMessages,
-  currentUserEmail,
-  includeExcluded
-) {
+function getWaitingOnFromRecentMessages(realThreads, realMessages, currentUserEmail) {
   const now = new Date();
   const threadById = new Map((realThreads || []).map((t) => [t.threadId, t]));
 
@@ -181,46 +198,47 @@ function getWaitingOnFromRecentMessages(
 
     const thread = threadById.get(m.threadId);
     if (!thread) return;
-    if (!includeExcluded && getEnforcementForThread(thread) === 'complete_exclusion') return;
 
     const noReplySince =
       !thread.lastMessageReceivedTimestamp ||
       new Date(thread.lastMessageReceivedTimestamp) < new Date(m.date);
     if (!noReplySince) return;
 
-    const other = (thread.participantDetails || []).find(
-      (p) => p.email !== currentUserEmail
-    );
     const days = daysSince(m.date, now);
     // `m` IS the user's own pending message here (recentSent is filtered to
     // fromEmail === currentUserEmail above) — already exactly the right
     // text to scan for urgent language, no extra lookup needed.
+    const urgency = computeUrgency(days, stripped);
+    const rule = getMatchingRuleForThread(thread);
+    if (rule && rule.enforcementMode === 'complete_exclusion') {
+      results.push(redactedItem(thread.threadId, days, urgency, rule));
+      return;
+    }
+
+    const other = (thread.participantDetails || []).find(
+      (p) => p.email !== currentUserEmail
+    );
     results.push({
       threadId: thread.threadId,
       subject: thread.subject,
       waitingOn: other ? other.name : thread.sender || 'Unknown',
       waitingOnEmail: other ? other.email : '',
       daysWaiting: days,
-      urgency: computeUrgency(days, stripped),
+      urgency,
+      redacted: false,
     });
   });
 
   return results;
 }
 
-function getWaitingOnFromReal(realThreads, realMessages, currentUserEmail, includeExcluded) {
-  const fromThreads = getWaitingOnFromThreadTimestamps(
-    realThreads,
-    realMessages,
-    currentUserEmail,
-    includeExcluded
-  );
+function getWaitingOnFromReal(realThreads, realMessages, currentUserEmail) {
+  const fromThreads = getWaitingOnFromThreadTimestamps(realThreads, realMessages, currentUserEmail);
   const alreadyFound = new Set(fromThreads.map((w) => w.threadId));
   const fromMessages = getWaitingOnFromRecentMessages(
     realThreads,
     realMessages,
-    currentUserEmail,
-    includeExcluded
+    currentUserEmail
   ).filter((w) => !alreadyFound.has(w.threadId));
 
   return [...fromThreads, ...fromMessages].sort(
@@ -233,15 +251,17 @@ function getWaitingOnFromReal(realThreads, realMessages, currentUserEmail, inclu
  * falls back to mock. Same rule as buildMailboxContext: an explicit []
  * is real data that found nothing, and must NOT fall back to mock.
  *
- * `includeExcluded` (default false) controls whether boundary-protected
- * threads are dropped — see getWaitingOnFromMock's own doc for why a caller
- * would ever want the excluded ones (count-only, never content display).
+ * A thread under a "complete_exclusion" boundary rule is never dropped from
+ * this result — it comes back redacted (see redactedItem above). Callers
+ * that need a hard filter instead (e.g. LLM grounding) must filter out
+ * `redacted` items themselves; callers that just need a skipped-count sum
+ * `redacted` items directly.
  */
-function getWaitingOn(realThreads, realMessages, currentUserEmail, { includeExcluded = false } = {}) {
+function getWaitingOn(realThreads, realMessages, currentUserEmail) {
   if (realThreads !== undefined) {
-    return getWaitingOnFromReal(realThreads, realMessages, currentUserEmail, includeExcluded);
+    return getWaitingOnFromReal(realThreads, realMessages, currentUserEmail);
   }
-  return getWaitingOnFromMock(includeExcluded);
+  return getWaitingOnFromMock();
 }
 
 /**
@@ -261,13 +281,10 @@ function getWaitingOn(realThreads, realMessages, currentUserEmail, { includeExcl
  * separate/conflicting filter, this is the same one getWaitingOn's
  * eligibility check already relies on, just for the opposite direction.
  */
-function getNeedsResponseFromReal(realThreads, realMessages, currentUserEmail, includeExcluded) {
+function getNeedsResponseFromReal(realThreads, realMessages, currentUserEmail) {
   const now = new Date();
   return (realThreads || [])
     .filter((t) => {
-      if (!includeExcluded && getEnforcementForThread(t) === 'complete_exclusion') {
-        return false;
-      }
       if (!t.lastMessageReceivedTimestamp) return false;
       if (!t.lastMessageSentTimestamp) return true;
       return (
@@ -287,13 +304,19 @@ function getNeedsResponseFromReal(realThreads, realMessages, currentUserEmail, i
       const pendingText =
         findLatestMessageBodyFrom(realMessages, t.threadId, otherEmail) ||
         stripHtml(t.snippet || '');
+      const urgency = computeUrgency(days, pendingText);
+      const rule = getMatchingRuleForThread(t);
+      if (rule && rule.enforcementMode === 'complete_exclusion') {
+        return redactedItem(t.threadId, days, urgency, rule);
+      }
       return {
         threadId: t.threadId,
         subject: t.subject,
         from: other ? other.name : t.sender || 'Unknown',
         fromEmail: otherEmail,
         daysWaiting: days,
-        urgency: computeUrgency(days, pendingText),
+        urgency,
+        redacted: false,
       };
     })
     // Descending by date = most recently received first (ascending days
@@ -303,9 +326,13 @@ function getNeedsResponseFromReal(realThreads, realMessages, currentUserEmail, i
     .sort((a, b) => a.daysWaiting - b.daysWaiting);
 }
 
-function getNeedsResponse(realThreads, realMessages, currentUserEmail, { includeExcluded = false } = {}) {
+/**
+ * A thread under a "complete_exclusion" boundary rule comes back redacted
+ * (see redactedItem above), same contract as getWaitingOn.
+ */
+function getNeedsResponse(realThreads, realMessages, currentUserEmail) {
   if (realThreads !== undefined) {
-    return getNeedsResponseFromReal(realThreads, realMessages, currentUserEmail, includeExcluded);
+    return getNeedsResponseFromReal(realThreads, realMessages, currentUserEmail);
   }
   return [];
 }

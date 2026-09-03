@@ -52,28 +52,33 @@ test('DELETE returns 404 for an unknown id', async () => {
 
 // --- Ingestion gate (waiting-on / commitments) ---
 
-test('GET /waiting-on respects a complete_exclusion folder rule', async () => {
+test('GET /waiting-on redacts a complete_exclusion folder rule match instead of dropping it', async () => {
   await request(app)
     .post(`${PREFIX}/boundary-rules`)
     .send({ ruleType: 'folder', value: '/HR/Compensation', enforcementMode: 'complete_exclusion' });
 
   const res = await request(app).get(`${PREFIX}/waiting-on`);
-  assert.equal(
-    res.body.items.some((i) => i.threadId === 't4'),
-    false
-  );
+  const item = res.body.items.find((i) => i.threadId === 't4');
+  assert.ok(item, 'redacted item must still be present, not dropped');
+  assert.equal(item.redacted, true);
+  assert.equal(item.zoneLabel, 'HR/Compensation');
+  assert.equal(item.subject, undefined);
+  assert.equal(item.waitingOn, undefined);
 });
 
-test('GET /commitments respects a complete_exclusion folder rule', async () => {
+test('GET /commitments redacts a complete_exclusion folder rule match instead of dropping it', async () => {
   await request(app)
     .post(`${PREFIX}/boundary-rules`)
     .send({ ruleType: 'folder', value: '/HR', enforcementMode: 'complete_exclusion' });
 
   const res = await request(app).get(`${PREFIX}/commitments`);
-  assert.equal(
-    res.body.items.some((i) => i.threadId === 't4'),
-    false
-  );
+  const item = res.body.items.find((i) => i.threadId === 't4');
+  assert.ok(item, 'redacted commitment must still be present, not dropped');
+  assert.equal(item.redacted, true);
+  assert.equal(item.zoneLabel, 'HR');
+  assert.equal(item.subject, undefined);
+  assert.equal(item.person, undefined);
+  assert.equal(item.commitmentText, undefined);
 });
 
 // --- Action gate ---
